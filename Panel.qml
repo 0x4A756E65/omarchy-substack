@@ -285,7 +285,7 @@ Panel {
       }
 
       SequentialAnimation {
-        running: tickerLabel.overflow > 0 && !root.opened
+        running: root.showTicker && tickerLabel.overflow > 0 && !root.opened
         loops: Animation.Infinite
         onRunningChanged: if (!running) tickerLabel.panOffset = 0
         PauseAnimation { duration: 3000 }
@@ -724,13 +724,17 @@ Panel {
           model: root.articleList
           boundsBehavior: Flickable.StopAtBounds
           ScrollBar.vertical: ScrollBar {
+            id: articleScrollBar
+            width: Style.space(5)
             policy: articleListView.contentHeight > articleListView.height ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
           }
 
           delegate: BorderSurface {
             id: articleRow
             required property var modelData
-            width: articleListView.width
+            // Attached scrollbars overlay flickable content. Reserve a fixed
+            // gutter so dates and hover borders never sit underneath it.
+            width: articleListView.width - Style.space(10)
             height: Style.space(78)
             radius: Style.spacing.labelGap
             color: rowMouse.containsMouse ? Style.hoverFillFor(root.foreground, root.orange) : "transparent"
@@ -848,35 +852,35 @@ Panel {
           anchors.bottom: parent.bottom
           height: Style.space(29)
 
-          Row {
+          Rectangle {
+            id: syncDot
             anchors.left: parent.left
             anchors.verticalCenter: parent.verticalCenter
-            spacing: Style.space(7)
+            width: Style.space(6)
+            height: width
+            radius: width / 2
+            color: root.feedState.status === "ready" ? "#49c978"
+              : root.feedState.syncing === true ? root.orange
+              : root.feedState.status === "error" || root.feedState.status === "expired" ? "#ff7b72"
+              : root.dim
+          }
 
-            Rectangle {
-              width: Style.space(6)
-              height: width
-              radius: width / 2
-              color: root.feedState.status === "ready" ? "#49c978"
-                : root.feedState.syncing === true ? root.orange
-                : root.feedState.status === "error" || root.feedState.status === "expired" ? "#ff7b72"
-                : root.dim
+          Text {
+            anchors.left: syncDot.right
+            anchors.leftMargin: Style.space(7)
+            anchors.right: parent.right
+            anchors.rightMargin: Style.space(10)
+            anchors.verticalCenter: parent.verticalCenter
+            text: {
+              if (root.localError !== "") return root.localError
+              if (root.feedState.last_error) return String(root.feedState.last_error)
+              if (root.feedState.syncing === true) return "SYNCING"
+              return root.syncedLabel(root.feedState.last_sync)
             }
-
-            Text {
-              text: {
-                if (root.localError !== "") return root.localError
-                if (root.feedState.last_error) return String(root.feedState.last_error)
-                if (root.feedState.syncing === true) return "SYNCING"
-                return root.syncedLabel(root.feedState.last_sync)
-              }
-              width: Math.min(parent.parent.width - Style.space(20), implicitWidth)
-              color: root.dimmer
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              elide: Text.ElideRight
-              anchors.verticalCenter: parent.verticalCenter
-            }
+            color: root.dimmer
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            elide: Text.ElideRight
           }
         }
       }
@@ -949,17 +953,23 @@ Panel {
           anchors.top: settingsDivider.bottom
           anchors.topMargin: Style.space(14)
           anchors.bottom: parent.bottom
-          contentWidth: width
+          contentWidth: settingsContent.width
           contentHeight: settingsContent.implicitHeight
           clip: true
           boundsBehavior: Flickable.StopAtBounds
           flickableDirection: Flickable.VerticalFlick
           interactive: contentHeight > height
-          ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+          ScrollBar.vertical: ScrollBar {
+            id: settingsScrollBar
+            width: Style.space(5)
+            policy: ScrollBar.AsNeeded
+          }
 
           Column {
             id: settingsContent
-            width: settingsFlick.width
+            // Keep toggles, buttons, and card borders out from under the
+            // overlay scrollbar at every scroll position.
+            width: settingsFlick.width - Style.space(12)
             spacing: Style.space(16)
 
             BorderSurface {
@@ -1020,8 +1030,8 @@ Panel {
 
             Toggle {
               width: parent.width
-              label: "Bar headline"
-              description: "Scroll the newest unread post title in the status bar."
+              label: "Substack titles in bar"
+              description: "Show and scroll Substack's newest unread title. Off shows only its unread count; music scrolling is controlled by Spotmarchy."
               checked: root.showTicker
               foreground: root.foreground
               accent: root.orange
@@ -1126,6 +1136,9 @@ Panel {
     function settings(): void {
       root.open()
       root.showSettings(true)
+    }
+    function toggleHeadline(): void {
+      root.persistSettings({ showTicker: !root.showTicker })
     }
   }
 }

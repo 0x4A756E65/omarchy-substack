@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1 — 2026-08-29
+
+- Reserve explicit gutters for feed and settings scrollbars.
+- Replace implicit footer layout with fixed anchors.
+- Clarify that the headline toggle affects Substack, not Spotmarchy music.
+- Verify headline-setting persistence through the running Omarchy shell.
+
 ## 0.2.0 — 2026-08-29
 
 - Add a full in-panel settings and account surface.
