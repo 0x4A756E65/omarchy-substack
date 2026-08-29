@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "id": "aaron.substack",
+  "name": "Substack Feed",
+  "version": "0.2.0",
+  "author": "0x4A756E65",
+  "license": "MIT",
+  "description": "A calm, native feed of posts from your Substack subscriptions, with browser handoff and notifications.",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Substack Feed",
+    "description": "Recent posts from publications you subscribe to, with native notifications and one-click browser handoff.",
+    "category": "Communication",
+    "aliases": [
+      "substack",
+      "newsletter",
+      "reader",
+      "rss"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "notify": true,
+      "showTicker": true,
+      "showPublicationLogos": true,
+      "includeOwned": false,
+      "maxLabelWidth": 210
+    },
+    "schema": [
+      {
+        "key": "notify",
+        "type": "boolean",
+        "label": "New post notifications",
+        "defaultValue": true
+      },
+      {
+        "key": "showTicker",
+        "type": "boolean",
+        "label": "Show the newest unread title in the bar",
+        "defaultValue": true
+      },
+      {
+        "key": "showPublicationLogos",
+        "type": "boolean",
+        "label": "Show real publication artwork",
+        "defaultValue": true
+      },
+      {
+        "key": "includeOwned",
+        "type": "boolean",
+        "label": "Include publications I administer",
+        "defaultValue": false
+      },
+      {
+        "key": "maxLabelWidth",
+        "type": "integer",
+        "label": "Maximum ticker width (px)",
+        "min": 100,
+        "max": 420,
+        "step": 10,
+        "defaultValue": 210
+      }
+    ]
+  }
+}

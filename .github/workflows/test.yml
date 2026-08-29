@@ -1,0 +1,23 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Validate manifest JSON
+        run: python -m json.tool manifest.json >/dev/null
+      - name: Compile backend
+        run: python -m py_compile substack_backend.py
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
