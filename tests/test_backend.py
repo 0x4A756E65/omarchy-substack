@@ -3,9 +3,12 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 BACKEND_PATH = Path(__file__).resolve().parents[1] / "substack_backend.py"
+PANEL_PATH = BACKEND_PATH.with_name("Panel.qml")
+SERVICE_PATH = BACKEND_PATH.with_name("Service.qml")
 SPEC = importlib.util.spec_from_file_location("substack_backend", BACKEND_PATH)
 backend = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
@@ -40,6 +43,7 @@ class BackendTests(unittest.TestCase):
         backend.STATE_LOCK = root / "state.lock"
         backend.CONFIG_LOCK = root / "config.lock"
         backend.DAEMON_LOCK = root / "daemon.lock"
+        backend.AUTH_LOCK = root / "auth.lock"
         backend.REFRESH_REQUEST = root / "refresh.request"
         backend.ensure_dirs()
         backend.atomic_json(backend.STATE_FILE, backend.default_state())
@@ -66,7 +70,7 @@ class BackendTests(unittest.TestCase):
                         "subdomain": "smallhours",
                         "custom_domain": "smallhours.example",
                         "author_name": "Robin Writer",
-                        "logo_url": "https://cdn.example/small-hours.png",
+                        "logo_url": "https://substackcdn.com/small-hours.png",
                     }
                 ],
             }
@@ -74,7 +78,7 @@ class BackendTests(unittest.TestCase):
         self.assertTrue(recognized)
         self.assertEqual(publications[0]["url"], "https://smallhours.example")
         self.assertEqual(publications[0]["feed_url"], "https://smallhours.substack.com/feed")
-        self.assertEqual(publications[0]["logo_url"], "https://cdn.example/small-hours.png")
+        self.assertEqual(publications[0]["logo_url"], "https://substackcdn.com/small-hours.png")
 
     def test_page_v2_marks_admin_publications_as_owned(self):
         recognized, publications = backend.parse_publications(
@@ -108,7 +112,7 @@ class BackendTests(unittest.TestCase):
                             "id": "42",
                             "name": "Small Hours",
                             "subdomain": "smallhours",
-                            "logo_url": "https://cdn.example/logo.png",
+                            "logo_url": "https://substackcdn.com/logo.png",
                         }
                     },
                 }
@@ -161,6 +165,96 @@ class BackendTests(unittest.TestCase):
         self.assertFalse(backend.magic_link_allowed("https://substack.example/sign-in?token=abc"))
         self.assertFalse(backend.magic_link_allowed("https://substack.com/library?token=abc"))
         self.assertFalse(backend.magic_link_allowed("https://substack.com/sign-in"))
+        self.assertFalse(backend.magic_link_allowed("https://substack.com:8443/sign-in?token=abc"))
+
+    def test_auth_navigation_is_restricted_to_substack_and_cloudflare_challenge(self):
+        self.assertTrue(backend.auth_navigation_allowed("https://substack.com/sign-in"))
+        self.assertTrue(backend.auth_navigation_allowed("https://www.substack.com/library"))
+        self.assertTrue(backend.auth_navigation_allowed("https://challenges.cloudflare.com/turnstile"))
+        self.assertFalse(backend.auth_navigation_allowed("https://example.com/sign-in"))
+        self.assertFalse(backend.auth_navigation_allowed("http://substack.com/sign-in"))
+        self.assertFalse(backend.auth_navigation_allowed("https://substack.com:8443/sign-in"))
+
+    def test_requests_fail_closed_outside_the_exact_https_origin(self):
+        backend.validate_request_target(
+            "https://substack.com/api/v1/user/profile/self", {"substack.com"}, {"connect.sid": "ok"}
+        )
+        with self.assertRaises(backend.BackendError):
+            backend.validate_request_target("http://substack.com/api", {"substack.com"}, None)
+        with self.assertRaises(backend.BackendError):
+            backend.validate_request_target("https://www.substack.com/api", {"substack.com"}, {"connect.sid": "ok"})
+        with self.assertRaises(backend.BackendError):
+            backend.validate_request_target(
+                "https://newsletter.substack.com:8443/feed", {"newsletter.substack.com"}, None
+            )
+        with self.assertRaises(backend.BackendError):
+            backend.RejectRedirects().redirect_request(None, None, 302, "Found", {}, "https://example.com/")
+
+    def test_session_cookie_values_cannot_inject_headers(self):
+        self.assertEqual(
+            backend.normalize_session_cookies({"connect.sid": "safe.value"}), {"connect.sid": "safe.value"}
+        )
+        self.assertEqual(backend.normalize_session_cookies({"connect.sid": "bad\r\nHeader: injected"}), {})
+        self.assertEqual(backend.normalize_session_cookies({"other": "ignored"}), {})
+
+    def test_external_urls_reject_local_targets_and_untrusted_artwork(self):
+        self.assertEqual(backend.safe_article_url("https://127.0.0.1/post"), "")
+        self.assertEqual(backend.safe_article_url("https://localhost/post"), "")
+        self.assertEqual(backend.safe_article_url("https://intranet/post"), "")
+        self.assertEqual(backend.safe_article_url("https://example.com:8443/post"), "")
+        self.assertEqual(backend.safe_article_url("https://example.com/post"), "https://example.com/post")
+        self.assertEqual(backend.safe_image_url("https://tracker.example/pixel.png"), "")
+        self.assertEqual(
+            backend.safe_image_url("https://substack-post-media.s3.amazonaws.com/public/logo.png"),
+            "https://substack-post-media.s3.amazonaws.com/public/logo.png",
+        )
+
+    def test_doctype_and_entities_are_rejected_before_xml_parsing(self):
+        dangerous = b'<!DOCTYPE rss [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><rss><channel/></rss>'
+        with self.assertRaises(backend.BackendError):
+            backend.parse_feed(dangerous, self.publication())
+
+    def test_one_empty_subscription_sync_preserves_last_good_feed(self):
+        publication = {**self.publication(), "seen_ids": [], "last_checked": 1, "next_poll": 100}
+        article = {
+            "id": "a" * 24,
+            "publication_id": "smallhours",
+            "title": "Keep me",
+            "link": "https://smallhours.substack.com/p/keep-me",
+            "unread": False,
+        }
+
+        def seed(state):
+            state["subscriptions"] = [publication]
+            state["articles"] = [article]
+
+        backend.mutate_state(seed)
+        with (
+            mock.patch.object(backend, "fetch_subscriptions", return_value=[]),
+            mock.patch.object(backend, "fetch_profile", return_value={"name": "Reader"}),
+            mock.patch.object(backend, "now_ts", return_value=1000),
+        ):
+            backend.sync_publications({"connect.sid": "safe.value"})
+            first = backend.load_state()
+            self.assertEqual(len(first["subscriptions"]), 1)
+            self.assertEqual(len(first["articles"]), 1)
+            self.assertEqual(first["empty_subscription_confirmations"], 1)
+            self.assertEqual(first["subscription_sync_due"], 1000 + backend.EMPTY_SUBSCRIPTION_RECHECK_SECONDS)
+
+            backend.sync_publications({"connect.sid": "safe.value"})
+            second = backend.load_state()
+            self.assertEqual(second["subscriptions"], [])
+            self.assertEqual(second["articles"], [])
+            self.assertEqual(second["empty_subscription_confirmations"], 0)
+
+    def test_qml_security_and_singleton_ipc_guards_remain_present(self):
+        panel = PANEL_PATH.read_text(encoding="utf-8")
+        service = SERVICE_PATH.read_text(encoding="utf-8")
+        self.assertNotIn("IpcHandler {", panel)
+        self.assertEqual(service.count("IpcHandler {"), 1)
+        self.assertIn('target: "aaron.substack"', service)
+        self.assertIn("textFormat: Text.PlainText", panel)
+        self.assertIn("Blocked navigation outside Substack", BACKEND_PATH.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

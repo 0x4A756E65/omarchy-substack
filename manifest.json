@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "aaron.substack",
   "name": "Substack Feed",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "author": "0x4A756E65",
   "license": "MIT",
   "description": "A calm, native feed of posts from your Substack subscriptions, with browser handoff and notifications.",
@@ -43,7 +43,7 @@
       {
         "key": "showTicker",
         "type": "boolean",
-        "label": "Show the newest unread title in the bar",
+        "label": "Show the newest title in the bar",
         "defaultValue": true
       },
       {

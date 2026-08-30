@@ -16,7 +16,7 @@ import email.utils
 import fcntl
 import hashlib
 import html
-import http.cookiejar
+import ipaddress
 import json
 import os
 import re
@@ -47,6 +47,9 @@ MAX_JSON_BYTES = 8_000_000
 MAX_ARTICLES = 160
 MAX_SEEN_PER_PUBLICATION = 240
 SUBSCRIPTION_SYNC_SECONDS = 12 * 60 * 60
+EMPTY_SUBSCRIPTION_RECHECK_SECONDS = 15 * 60
+MAX_SECRET_BYTES = 64_000
+MAX_COOKIE_VALUE_BYTES = 16_384
 
 HOME = Path(os.environ.get("HOME", str(Path.home())))
 STATE_ROOT = Path(
@@ -60,6 +63,7 @@ CONFIG_FILE = STATE_ROOT / "config.json"
 STATE_LOCK = STATE_ROOT / "state.lock"
 CONFIG_LOCK = STATE_ROOT / "config.lock"
 DAEMON_LOCK = STATE_ROOT / "daemon.lock"
+AUTH_LOCK = STATE_ROOT / "auth.lock"
 REFRESH_REQUEST = STATE_ROOT / "refresh.request"
 SECRET_ATTRIBUTES = ("service", "omarchy-substack", "account", "default")
 SCRIPT_PATH = Path(__file__).resolve()
@@ -96,6 +100,7 @@ def default_state() -> dict[str, Any]:
         "last_sync": None,
         "last_subscription_sync": None,
         "subscription_sync_due": 0,
+        "empty_subscription_confirmations": 0,
         "last_error": "",
         "updated_at": iso_from_ts(),
     }
@@ -120,7 +125,10 @@ def ensure_dirs() -> None:
 @contextlib.contextmanager
 def locked(path: Path):
     ensure_dirs()
-    with path.open("a+") as handle:
+    descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    with os.fdopen(descriptor, "a+") as handle:
+        with contextlib.suppress(OSError):
+            os.fchmod(handle.fileno(), 0o600)
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         try:
             yield handle
@@ -207,7 +215,7 @@ def secret_lookup() -> dict[str, str]:
         )
     except (OSError, subprocess.TimeoutExpired):
         return {}
-    if result.returncode != 0 or not result.stdout.strip():
+    if result.returncode != 0 or not result.stdout.strip() or len(result.stdout.encode("utf-8")) > MAX_SECRET_BYTES:
         return {}
     try:
         value = json.loads(result.stdout)
@@ -215,15 +223,28 @@ def secret_lookup() -> dict[str, str]:
         return {}
     if not isinstance(value, dict):
         return {}
-    return {
-        name: str(cookie)
-        for name, cookie in value.items()
-        if name in {"connect.sid", "substack.sid"} and str(cookie)
-    }
+    return normalize_session_cookies(value)
+
+
+def cookie_value_is_safe(value: str) -> bool:
+    encoded = value.encode("utf-8", errors="ignore")
+    return bool(value) and len(encoded) <= MAX_COOKIE_VALUE_BYTES and not re.search(r"[\x00-\x20;\x7f]", value)
+
+
+def normalize_session_cookies(value: dict[str, Any]) -> dict[str, str]:
+    normalized: dict[str, str] = {}
+    for name in ("connect.sid", "substack.sid"):
+        cookie = str(value.get(name) or "")
+        if cookie_value_is_safe(cookie):
+            normalized[name] = cookie
+    return normalized
 
 
 def secret_store(cookies: dict[str, str]) -> None:
-    payload = json.dumps(cookies, separators=(",", ":"))
+    normalized = normalize_session_cookies(cookies)
+    if not normalized:
+        raise BackendError("Substack did not provide a valid session cookie")
+    payload = json.dumps(normalized, separators=(",", ":"))
     try:
         result = subprocess.run(
             ["secret-tool", "store", "--label=Omarchy Substack session", *SECRET_ATTRIBUTES],
@@ -249,17 +270,49 @@ def secret_clear() -> None:
 
 
 def cookie_header(cookies: dict[str, str]) -> str:
-    return "; ".join(f"{name}={value}" for name, value in cookies.items() if value)
+    return "; ".join(f"{name}={value}" for name, value in normalize_session_cookies(cookies).items())
+
+
+class RejectRedirects(urllib.request.HTTPRedirectHandler):
+    """Fail before following any redirect, so secrets and feed fetches never change origin."""
+
+    def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> Any:
+        raise BackendError("Substack returned an unexpected redirect")
+
+
+HTTP_OPENER = urllib.request.build_opener(RejectRedirects())
+
+
+def validate_request_target(url: str, allowed_hosts: set[str], cookies: dict[str, str] | None) -> None:
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        port = parsed.port
+    except ValueError as exc:
+        raise BackendError("The remote address is invalid") from exc
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+    if (
+        parsed.scheme != "https"
+        or not hostname
+        or parsed.username
+        or parsed.password
+        or port not in (None, 443)
+        or hostname not in allowed_hosts
+    ):
+        raise BackendError("The remote address is outside the permitted Substack origin")
+    if cookies and hostname != "substack.com":
+        raise BackendError("The Substack session may only be sent to substack.com")
 
 
 def request(
     url: str,
     *,
+    allowed_hosts: set[str],
     cookies: dict[str, str] | None = None,
     headers: dict[str, str] | None = None,
     max_bytes: int = MAX_JSON_BYTES,
     timeout: int = 20,
 ) -> tuple[int, str, dict[str, str], bytes]:
+    validate_request_target(url, allowed_hosts, cookies)
     request_headers = {
         "User-Agent": USER_AGENT,
         "Accept": "application/json, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.1",
@@ -269,7 +322,7 @@ def request(
         request_headers["Cookie"] = cookie_header(cookies)
     req = urllib.request.Request(url, headers=request_headers)
     try:
-        response = urllib.request.urlopen(req, timeout=timeout)
+        response = HTTP_OPENER.open(req, timeout=timeout)
     except urllib.error.HTTPError as exc:
         if exc.code == 304:
             return 304, exc.geturl(), dict(exc.headers), b""
@@ -288,7 +341,7 @@ def request(
 
 
 def request_json(path: str, cookies: dict[str, str]) -> dict[str, Any]:
-    status, _, _, body = request(SUBSTACK_ORIGIN + path, cookies=cookies)
+    status, _, _, body = request(SUBSTACK_ORIGIN + path, allowed_hosts={"substack.com"}, cookies=cookies)
     if status != 200:
         raise BackendError(f"Unexpected Substack response ({status})")
     try:
@@ -344,7 +397,8 @@ def parse_publications(data: dict[str, Any]) -> tuple[bool, list[dict[str, Any]]
         publication_id = publication.get("id") or subscription.get("publication_id")
         owned = str(publication_id) in owned_publication_ids
         custom_domain = str(publication.get("custom_domain") or "").strip().lower()
-        display_url = f"https://{custom_domain}" if custom_domain else f"https://{subdomain}.substack.com"
+        custom_url = safe_article_url(f"https://{custom_domain}") if custom_domain else ""
+        display_url = custom_url or f"https://{subdomain}.substack.com"
         membership = str(subscription.get("membership_state") or subscription.get("type") or "subscribed")
         normalized.append(
             {
@@ -353,8 +407,8 @@ def parse_publications(data: dict[str, Any]) -> tuple[bool, list[dict[str, Any]]
                 "name": str(publication.get("name") or subdomain),
                 "author": str(publication.get("author_name") or publication.get("author") or ""),
                 "description": clean_text(str(publication.get("description") or ""), 220),
-                "logo_url": safe_article_url(str(publication.get("logo_url") or "")),
-                "author_photo_url": safe_article_url(str(publication.get("author_photo_url") or "")),
+                "logo_url": safe_image_url(str(publication.get("logo_url") or "")),
+                "author_photo_url": safe_image_url(str(publication.get("author_photo_url") or "")),
                 "subdomain": subdomain,
                 "url": display_url,
                 "feed_url": f"https://{subdomain}.substack.com/feed",
@@ -399,7 +453,7 @@ def fetch_profile(cookies: dict[str, str]) -> dict[str, Any]:
     return {
         "name": str(data.get("name") or data.get("handle") or "Substack reader"),
         "handle": str(data.get("handle") or ""),
-        "photo_url": str(data.get("photo_url") or ""),
+        "photo_url": safe_image_url(str(data.get("photo_url") or "")),
     }
 
 
@@ -450,15 +504,53 @@ def safe_article_url(value: str) -> str:
     source = html.unescape(str(value or "").strip())
     if len(source) > 4096:
         return ""
-    parsed = urllib.parse.urlsplit(source)
-    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+    try:
+        parsed = urllib.parse.urlsplit(source)
+        port = parsed.port
+    except ValueError:
+        return ""
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+    if (
+        parsed.scheme != "https"
+        or not hostname
+        or parsed.username
+        or parsed.password
+        or port not in (None, 443)
+        or not hostname_is_public_reference(hostname)
+    ):
         return ""
     return urllib.parse.urlunsplit(parsed)
 
 
+def hostname_is_public_reference(hostname: str) -> bool:
+    value = hostname.lower().rstrip(".")
+    if value == "localhost" or value.endswith((".localhost", ".local", ".internal", ".lan", ".home")):
+        return False
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        labels = value.split(".")
+        return len(labels) >= 2 and len(value) <= 253 and all(subdomain_is_safe(label) for label in labels)
+    return address.is_global
+
+
+def safe_image_url(value: str) -> str:
+    safe = safe_article_url(value)
+    if not safe:
+        return ""
+    hostname = (urllib.parse.urlsplit(safe).hostname or "").lower()
+    allowed = (
+        hostname == "substackcdn.com"
+        or hostname.endswith(".substackcdn.com")
+        or hostname == "substack-post-media.s3.amazonaws.com"
+        or hostname == "bucketeer-e05bbc84-baa3-437e-9518-adb32be77984.s3.amazonaws.com"
+    )
+    return safe if allowed else ""
+
+
 def image_from_html(value: str) -> str:
     match = re.search(r"<img\b[^>]*\bsrc=[\"']([^\"']+)", value, flags=re.I)
-    return safe_article_url(match.group(1)) if match else ""
+    return safe_image_url(match.group(1)) if match else ""
 
 
 def parse_feed(body: bytes, publication: dict[str, Any]) -> list[dict[str, Any]]:
@@ -501,7 +593,7 @@ def parse_feed(body: bytes, publication: dict[str, Any]) -> list[dict[str, Any]]
                 candidate = child.attrib.get("url", "")
                 mime = child.attrib.get("type", "")
                 if candidate and (not mime or mime.startswith("image/")):
-                    image = safe_article_url(candidate)
+                    image = safe_image_url(candidate)
                     if image:
                         break
         if not image:
@@ -624,6 +716,27 @@ def sync_publications(cookies: dict[str, str]) -> None:
     stamp = now_ts()
 
     def update(state: dict[str, Any]) -> None:
+        previous_publications = [item for item in state["subscriptions"] if isinstance(item, dict)]
+        if not publications and previous_publications:
+            confirmations = int(state.get("empty_subscription_confirmations") or 0) + 1
+            state["empty_subscription_confirmations"] = confirmations
+            if confirmations < 2:
+                # The account API is undocumented. A single empty response can
+                # be a transient or a shape change, so preserve the last good
+                # queue and confirm it on a short follow-up before deleting it.
+                state["authenticated"] = True
+                state["account"] = profile
+                state["last_subscription_sync"] = iso_from_ts(stamp)
+                state["subscription_sync_due"] = stamp + EMPTY_SUBSCRIPTION_RECHECK_SECONDS
+                state["status"] = "ready"
+                state["syncing"] = False
+                state["message"] = f"Following {len(previous_publications)} publications"
+                state["last_error"] = (
+                    "Substack returned an empty list; keeping the last good feed until it is confirmed."
+                )
+                return
+
+        state["empty_subscription_confirmations"] = 0
         prior_by_id = {item.get("id"): item for item in state["subscriptions"] if isinstance(item, dict)}
         next_publications: list[dict[str, Any]] = []
         active_ids: set[str] = set()
@@ -787,11 +900,14 @@ class FeedDaemon:
             )
         )
         try:
-            status, final_url, response_headers, body = request(
-                publication["feed_url"], headers=headers, max_bytes=MAX_FEED_BYTES, timeout=20
+            expected_feed_host = f"{publication['subdomain']}.substack.com"
+            status, _, response_headers, body = request(
+                publication["feed_url"],
+                allowed_hosts={expected_feed_host},
+                headers=headers,
+                max_bytes=MAX_FEED_BYTES,
+                timeout=20,
             )
-            if urllib.parse.urlsplit(final_url).scheme != "https":
-                raise BackendError("The feed redirected to an insecure address")
             if status == 304:
                 merge_not_modified(publication_id, checked)
                 return
@@ -840,7 +956,10 @@ class FeedDaemon:
         if not STATE_FILE.exists():
             atomic_json(STATE_FILE, default_state())
 
-        with DAEMON_LOCK.open("a+") as daemon_handle:
+        daemon_descriptor = os.open(DAEMON_LOCK, os.O_RDWR | os.O_CREAT, 0o600)
+        with os.fdopen(daemon_descriptor, "a+") as daemon_handle:
+            with contextlib.suppress(OSError):
+                os.fchmod(daemon_handle.fileno(), 0o600)
             try:
                 fcntl.flock(daemon_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
@@ -937,9 +1056,13 @@ def magic_link_allowed(value: str) -> bool:
     source = str(value or "").strip()
     if len(source) > 8192:
         return False
-    parsed = urllib.parse.urlsplit(source)
+    try:
+        parsed = urllib.parse.urlsplit(source)
+        port = parsed.port
+    except ValueError:
+        return False
     hostname = (parsed.hostname or "").lower()
-    if parsed.scheme != "https" or parsed.username or parsed.password:
+    if parsed.scheme != "https" or parsed.username or parsed.password or port not in (None, 443):
         return False
     if hostname != "substack.com" and not hostname.endswith(".substack.com"):
         return False
@@ -947,7 +1070,24 @@ def magic_link_allowed(value: str) -> bool:
     return parsed.path.rstrip("/") == "/sign-in" and bool(query.get("token"))
 
 
-def auth_window() -> int:
+def auth_navigation_allowed(value: str) -> bool:
+    source = str(value or "").strip()
+    if source == "about:blank":
+        return True
+    if len(source) > 8192:
+        return False
+    try:
+        parsed = urllib.parse.urlsplit(source)
+        port = parsed.port
+    except ValueError:
+        return False
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+    if parsed.scheme != "https" or parsed.username or parsed.password or port not in (None, 443):
+        return False
+    return hostname == "substack.com" or hostname.endswith(".substack.com") or hostname == "challenges.cloudflare.com"
+
+
+def _auth_window_unlocked() -> int:
     """Run Substack's own login page in a separate ephemeral WebKit window."""
     # WebKitGTK's DMA-BUF renderer currently trips a Wayland protocol error on
     # this Omarchy/Hyprland stack and closes the window as soon as it appears.
@@ -978,7 +1118,8 @@ def auth_window() -> int:
             header = Gtk.HeaderBar()
             header.set_show_close_button(True)
             header.props.title = "Connect Substack"
-            header.props.subtitle = "No email? Go back and choose password sign-in"
+            header.props.subtitle = "substack.com · temporary private session"
+            self.header = header
 
             back_button = Gtk.Button.new_from_icon_name("go-previous-symbolic", Gtk.IconSize.BUTTON)
             back_button.set_tooltip_text("Back / start over")
@@ -1008,6 +1149,8 @@ def auth_window() -> int:
             self.webview.get_settings().set_property("enable-developer-extras", False)
             self.webview.connect("load-changed", self.on_load_changed)
             self.webview.connect("load-failed", self.on_load_failed)
+            self.webview.connect("decide-policy", self.on_decide_policy)
+            self.webview.connect("permission-request", self.on_permission_request)
             overlay.add(self.webview)
 
             self.banner = Gtk.Label(label="")
@@ -1031,11 +1174,37 @@ def auth_window() -> int:
 
         def on_load_changed(self, _view: Any, event: Any) -> None:
             self.back_button.set_sensitive(True)
+            current_uri = str(self.webview.get_uri() or "")
+            if auth_navigation_allowed(current_uri):
+                hostname = urllib.parse.urlsplit(current_uri).hostname or "substack.com"
+                self.header.props.subtitle = f"{hostname} · temporary private session"
             if event == WebKit2.LoadEvent.FINISHED:
                 if self.password_requested:
                     self.password_requested = False
                     GLib.timeout_add(100, self.activate_password_form)
                 self.poll()
+
+        def on_decide_policy(self, _view: Any, decision: Any, decision_type: Any) -> bool:
+            if (
+                decision_type != WebKit2.PolicyDecisionType.NAVIGATION_ACTION
+                and decision_type != WebKit2.PolicyDecisionType.NEW_WINDOW_ACTION
+            ):
+                return False
+            try:
+                uri = str(decision.get_request().get_uri() or "")
+            except (AttributeError, GLib.Error):
+                decision.ignore()
+                self.banner.set_text("Blocked an invalid navigation request")
+                return True
+            if auth_navigation_allowed(uri):
+                return False
+            decision.ignore()
+            self.banner.set_text("Blocked navigation outside Substack")
+            return True
+
+        def on_permission_request(self, _view: Any, request: Any) -> bool:
+            request.deny()
+            return True
 
         def on_load_failed(self, _view: Any, _event: Any, _uri: str, error: Any) -> bool:
             self.banner.set_text("Substack could not load: " + str(error.message))
@@ -1146,6 +1315,20 @@ def auth_window() -> int:
             return 0 if self.finished else 1
 
     return Login().run()
+
+
+def auth_window() -> int:
+    ensure_dirs()
+    descriptor = os.open(AUTH_LOCK, os.O_RDWR | os.O_CREAT, 0o600)
+    with os.fdopen(descriptor, "a+") as handle:
+        with contextlib.suppress(OSError):
+            os.fchmod(handle.fileno(), 0o600)
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print("A Substack sign-in window is already open", file=sys.stderr)
+            return 3
+        return _auth_window_unlocked()
 
 
 def parse_bool(value: str) -> bool:

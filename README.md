@@ -8,6 +8,8 @@ normal browser.
 It is intentionally **not** an article reader. Paid content and full article
 bodies stay on Substack.
 
+![The Substack reading desk open beneath the Omarchy bar](preview.png)
+
 ## Install
 
 ```bash
@@ -17,6 +19,24 @@ omarchy plugin add https://github.com/0x4A756E65/omarchy-substack.git --enable
 Click the Substack item in the bar, choose **Connect Substack**, and sign in on
 Substack's own page. Password sign-in is the most reliable option; email codes
 and pasted one-time links are also supported.
+
+Update a Git-managed installation with:
+
+```bash
+omarchy plugin update aaron.substack
+```
+
+## Remove
+
+First open the plugin settings and choose **Log out**. This deletes the session
+from the desktop keyring and clears the local feed. Then remove the plugin:
+
+```bash
+omarchy plugin remove aaron.substack
+```
+
+Removal does not change subscriptions on Substack or overwrite other Omarchy
+configuration.
 
 ## What it does
 
@@ -32,13 +52,15 @@ and pasted one-time links are also supported.
 - Keeps polling already-discovered RSS feeds if the Substack session expires.
 - Uses real Substack publication artwork when available and never invents
   placeholder avatars.
+- Rejects network redirects and limits authenticated requests to Substack's
+  exact HTTPS origin.
 
 ## Settings
 
 Open the gear in the panel to control:
 
 - Publication artwork
-- The scrolling unread headline in the bar
+- The scrolling newest-post headline in the bar
 - Desktop notifications
 - Whether publications you administer appear in the feed
 - Immediate subscription/feed resync
@@ -73,6 +95,11 @@ The state file contains publication and article metadata, but no session
 cookie. The cookie is never written to `shell.json`, the repository, or the
 plugin directory.
 
+The temporary sign-in window rejects navigation outside Substack and its
+Cloudflare challenge origin, blocks permission requests, and displays the
+current origin in its header. Publication and article text is always rendered
+as plain text.
+
 ## Architecture and compatibility
 
 Publication RSS feeds are an officially documented Substack feature. Account
@@ -86,6 +113,14 @@ The authenticated `/api/v1/reader/feed` endpoint was evaluated but is not used
 for the queue: it mixes posts with comments, suggestions, and other social-feed
 items. Canonical publication RSS is smaller, more predictable, and a better
 fit for notifications.
+
+Runtime dependencies are provided by Omarchy: Quickshell, Python 3, GTK 3,
+WebKitGTK 4.1, and the Secret Service command-line client (`secret-tool`). The
+plugin has no third-party Python packages, install hooks, privileged commands,
+or bundled executable dependencies.
+
+Security reports are welcome through GitHub's private vulnerability reporting
+flow; see [SECURITY.md](SECURITY.md).
 
 This project is independent and is not affiliated with or endorsed by
 Substack.

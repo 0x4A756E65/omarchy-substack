@@ -30,6 +30,7 @@ Panel {
   })
   property bool stateLoaded: false
   property string localError: ""
+  property string authError: ""
   property bool settingsOpen: false
   property bool logoutArmed: false
 
@@ -66,6 +67,7 @@ Panel {
     if (!stateLoaded) return "Substack"
     if (feedState.syncing === true) return "Syncing…"
     if (unreadCount > 0 && showTicker && newestUnread) return String(newestUnread.title || "New post")
+    if (showTicker && featured) return String(featured.title || "Substack")
     if (unreadCount > 0) return String(unreadCount)
     return "Substack"
   }
@@ -107,8 +109,13 @@ Panel {
   }
 
   function connectAccount() {
+    if (authProcess.running) {
+      authError = "A Substack sign-in window is already open"
+      return
+    }
     close()
-    runBackend(["auth-window"])
+    authError = ""
+    authProcess.running = true
   }
 
   function refresh() {
@@ -206,6 +213,30 @@ Panel {
     }
   }
 
+  Process {
+    id: authProcess
+    command: ["python3", root.backendPath, "auth-window"]
+
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var message = String(text || "").trim()
+        if (message !== "") root.authError = message.substring(0, 240)
+      }
+    }
+
+    onExited: function(exitCode) {
+      if (exitCode === 0) {
+        root.authError = ""
+        stateFile.reload()
+      } else if (root.authError === "") {
+        root.authError = exitCode === 3
+          ? "A Substack sign-in window is already open"
+          : "Substack sign-in closed before the account connected"
+      }
+    }
+  }
+
   // The panel can be instantiated a few milliseconds before the service has
   // created its first snapshot. FileView cannot watch a file that did not yet
   // exist, so retry only until the first successful load.
@@ -272,6 +303,7 @@ Panel {
       Text {
         id: tickerLabel
         text: root.tickerText
+        textFormat: Text.PlainText
         color: root.foreground
         font.family: root.fontFamily
         font.pixelSize: Style.font.bodySmall
@@ -410,8 +442,9 @@ Panel {
 
           Text {
             width: parent.width
-            visible: root.localError !== ""
-            text: root.localError
+            visible: root.authError !== "" || root.localError !== ""
+            text: root.authError !== "" ? root.authError : root.localError
+            textFormat: Text.PlainText
             color: "#ff7b72"
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -468,6 +501,7 @@ Panel {
             Text {
               width: parent.width
               text: root.feedState.message || "Your Substack feed"
+              textFormat: Text.PlainText
               color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.body
@@ -612,6 +646,7 @@ Panel {
               Text {
                 width: parent.width - featuredMark.width - featuredTime.width - parent.spacing * 2
                 text: root.featured ? String(root.featured.publication || "Substack") : "Substack"
+                textFormat: Text.PlainText
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
@@ -634,6 +669,7 @@ Panel {
             Text {
               width: parent.width
               text: root.featured ? String(root.featured.title || "") : ""
+              textFormat: Text.PlainText
               color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.subtitle
@@ -646,6 +682,7 @@ Panel {
             Text {
               width: parent.width
               text: root.featured ? String(root.featured.excerpt || "") : ""
+              textFormat: Text.PlainText
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
@@ -794,6 +831,7 @@ Panel {
               Text {
                 width: parent.width
                 text: String(articleRow.modelData.title || "Untitled")
+                textFormat: Text.PlainText
                 color: root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.body
@@ -806,6 +844,7 @@ Panel {
               Text {
                 width: parent.width
                 text: String(articleRow.modelData.publication || "Substack")
+                textFormat: Text.PlainText
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
@@ -872,6 +911,7 @@ Panel {
             anchors.rightMargin: Style.space(10)
             anchors.verticalCenter: parent.verticalCenter
             text: {
+              if (root.authError !== "") return root.authError
               if (root.localError !== "") return root.localError
               if (root.feedState.last_error) return String(root.feedState.last_error)
               if (root.feedState.syncing === true) return "SYNCING"
@@ -881,6 +921,7 @@ Panel {
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
             elide: Text.ElideRight
+            textFormat: Text.PlainText
           }
         }
       }
@@ -989,6 +1030,7 @@ Panel {
                   text: root.feedState.account && root.feedState.account.handle
                     ? "@" + String(root.feedState.account.handle)
                     : "SUBSTACK ACCOUNT"
+                  textFormat: Text.PlainText
                   color: root.foreground
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.body
@@ -1031,7 +1073,7 @@ Panel {
             Toggle {
               width: parent.width
               label: "Substack titles in bar"
-              description: "Show and scroll Substack's newest unread title. Off shows only its unread count; music scrolling is controlled by Spotmarchy."
+              description: "Show and scroll the newest Substack title, prioritizing unread posts. Off shows only its unread count; music scrolling is controlled by Spotmarchy."
               checked: root.showTicker
               foreground: root.foreground
               accent: root.orange
@@ -1123,22 +1165,4 @@ Panel {
     }
   }
 
-  IpcHandler {
-    target: root.ipcTarget
-
-    function open(): void { root.open() }
-    function close(): void { root.close() }
-    function show(): void { root.open() }
-    function hide(): void { root.close() }
-    function toggle(): void { root.toggle() }
-    function refresh(): void { root.refresh() }
-    function markAllRead(): void { root.markAllRead() }
-    function settings(): void {
-      root.open()
-      root.showSettings(true)
-    }
-    function toggleHeadline(): void {
-      root.persistSettings({ showTicker: !root.showTicker })
-    }
-  }
 }
