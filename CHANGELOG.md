@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.1 — 2026-08-30
+
+- Replace regular-expression HTML cleanup with structured parsing so malformed
+  script and style end tags cannot leak active-content text into excerpts.
+
 ## 0.3.0 — 2026-08-30
 
 - Reject every backend redirect before it can change origin, forward a session

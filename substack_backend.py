@@ -29,6 +29,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Callable
 
@@ -457,10 +458,38 @@ def fetch_profile(cookies: dict[str, str]) -> dict[str, Any]:
     }
 
 
+class PlainTextHTMLParser(HTMLParser):
+    """Extract display text while discarding active and styling elements."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self.ignored_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        del attrs
+        if tag.lower() in {"script", "style"}:
+            self.ignored_depth += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() in {"script", "style"} and self.ignored_depth:
+            self.ignored_depth -= 1
+
+    def handle_data(self, data: str) -> None:
+        if not self.ignored_depth:
+            self.parts.append(data)
+
+
 def clean_text(value: str, limit: int = 260) -> str:
-    text = re.sub(r"<script\b[^>]*>.*?</script>", " ", value, flags=re.I | re.S)
-    text = re.sub(r"<style\b[^>]*>.*?</style>", " ", text, flags=re.I | re.S)
-    text = re.sub(r"<[^>]+>", " ", text)
+    parser = PlainTextHTMLParser()
+    try:
+        parser.feed(value)
+        parser.close()
+        text = " ".join(parser.parts)
+    except (AssertionError, ValueError):
+        # Malformed feed markup should degrade to a safe empty excerpt rather
+        # than leak tag contents or interrupt the rest of the RSS update.
+        text = ""
     text = html.unescape(text)
     text = re.sub(r"\s+", " ", text).strip()
     text = re.sub(r"\s+([,.;:!?])", r"\1", text)

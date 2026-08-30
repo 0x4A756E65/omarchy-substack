@@ -130,6 +130,10 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(articles[0]["publication"], "Small Hours")
         self.assertRegex(articles[0]["id"], r"^[0-9a-f]{24}$")
 
+    def test_html_cleanup_ignores_active_content_with_spaced_end_tags(self):
+        value = "<p>Keep this</p><script>alert('drop')</script ><style>drop too</style >"
+        self.assertEqual(backend.clean_text(value), "Keep this")
+
     def test_first_sync_seeds_and_second_sync_marks_only_new_article_unread(self):
         publication = self.publication()
 
