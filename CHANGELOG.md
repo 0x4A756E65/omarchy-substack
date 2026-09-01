@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.2 — 2026-08-31
+
+- Follow the bar host's transparency-aware foreground for the bar glyph and
+  ticker so they keep contrast against the wallpaper when the bar is
+  transparent, matching the native widgets.
+
 ## 0.3.1 — 2026-08-30
 
 - Replace regular-expression HTML cleanup with structured parsing so malformed

@@ -57,6 +57,10 @@ Panel {
   readonly property int maxLabelWidth: Math.max(100, Math.min(420, Number(setting("maxLabelWidth", 210)) || 210))
 
   readonly property color orange: "#ff6719"
+  // `foreground` is the static theme text color, used for panel/popup content
+  // that sits on an opaque surface. Bar-facing text (glyph, ticker) instead
+  // uses `barForeground` from the Panel base, which the host repoints to a
+  // wallpaper-sampled contrasting color while the bar is transparent.
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color dim: Qt.darker(foreground, 1.42)
   readonly property color dimmer: Qt.darker(foreground, 1.75)
@@ -272,11 +276,14 @@ Panel {
         id: glyph
         anchors.centerIn: parent
         text: "󰂺"
-        color: root.unreadCount > 0 ? root.orange : root.foreground
+        color: root.unreadCount > 0 ? root.orange : root.barForeground
         font.family: root.fontFamily
         font.pixelSize: Style.font.body
 
-        Behavior on color { ColorAnimation { duration: 160 } }
+        Behavior on color {
+          enabled: !root.bar || root.bar.foregroundAnimationEnabled
+          ColorAnimation { duration: 160 }
+        }
       }
 
       Rectangle {
@@ -304,7 +311,7 @@ Panel {
         id: tickerLabel
         text: root.tickerText
         textFormat: Text.PlainText
-        color: root.foreground
+        color: root.barForeground
         font.family: root.fontFamily
         font.pixelSize: Style.font.bodySmall
         font.bold: root.unreadCount > 0 && !root.showTicker
@@ -314,6 +321,11 @@ Panel {
         property real panOffset: 0
         readonly property real overflow: Math.max(0, implicitWidth - tickerClip.width)
         onTextChanged: panOffset = 0
+
+        Behavior on color {
+          enabled: !root.bar || root.bar.foregroundAnimationEnabled
+          ColorAnimation { duration: 160 }
+        }
       }
 
       SequentialAnimation {
