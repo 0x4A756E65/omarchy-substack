@@ -1,5 +1,9 @@
 # Omarchy Substack Feed
 
+> **Retired:** This repository is the legacy `aaron.substack` plugin. It has been replaced by [Omarchy Substack Feed](https://github.com/0x4A756E65/omarchy-substack-feed), plugin ID `0x4a756e65.omarchy-substack`.
+>
+> Use the replacement for new installations. Existing users should follow its [migration instructions](https://github.com/0x4A756E65/omarchy-substack-feed#moving-from-the-legacy-id) to preserve their session and feed state; do not log out first. Marketplace retirement is tracked in [omacom/omarchy-plugin-marketplace#13470](https://github.com/omacom/omarchy-plugin-marketplace/issues/13470).
+
 A calm, native reading desk for the Omarchy bar. It discovers the free and
 paid Substack publications attached to your account, watches their RSS feeds,
 sends desktop notifications for genuinely new posts, and opens stories in your
